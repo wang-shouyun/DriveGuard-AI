@@ -322,7 +322,11 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
-    stopDetector();
+    if (m_detector && m_detector->state() != QProcess::NotRunning) {
+        disconnect(m_detector, nullptr, this, nullptr);
+        m_detector->kill();
+        m_detector->waitForFinished(1000);
+    }
     if (m_db.isOpen()) {
         m_db.close();
     }
@@ -1403,7 +1407,22 @@ void MainWindow::insertSafetyEvent(const FatigueSample &sample, const QString &e
         }
     }
 
-    const QString evidencePath = sample.snapshotPath.isEmpty() ? sample.framePath : sample.snapshotPath;
+    QString evidencePath = sample.snapshotPath;
+    if (evidencePath.isEmpty() && QFileInfo::exists(sample.framePath)) {
+        const QString snapshotDir = QDir(runtimeDir()).filePath("snapshots");
+        QDir().mkpath(snapshotDir);
+        const QString safeTimestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+        const QString snapshotName = QString("event_%1_%2_%3.jpg")
+                                         .arg(safeTimestamp, sample.level)
+                                         .arg(sample.score);
+        const QString snapshotPath = QDir(snapshotDir).filePath(snapshotName);
+        if (QFile::copy(sample.framePath, snapshotPath)) {
+            evidencePath = snapshotPath;
+        } else {
+            appendLog("事件证据截图保存失败，暂时引用实时帧：" + sample.framePath);
+            evidencePath = sample.framePath;
+        }
+    }
     const int confidence = qBound(45, sample.score + sample.qualityScore / 4 + sample.calibrationProgress / 5, 98);
 
     QSqlQuery query(m_db);
@@ -1903,26 +1922,36 @@ void MainWindow::exportHtmlReport()
 
 void MainWindow::stopDetector()
 {
+    m_pendingMode.clear();
+    m_pendingSource.clear();
     if (!m_detector || m_detector->state() == QProcess::NotRunning) {
         setRunningUi(false);
         return;
     }
 
-    m_detector->terminate();
-    if (!m_detector->waitForFinished(2000)) {
-        m_detector->kill();
-        m_detector->waitForFinished(1000);
-    }
+    m_stopRequested = true;
+    m_detector->kill();
     setRunningUi(false);
     if (m_modeLabel) {
-        m_modeLabel->setText("已停止");
+        m_modeLabel->setText("正在停止");
     }
-    appendLog("检测进程已停止。");
+    appendLog("正在停止检测进程。");
 }
 
 void MainWindow::startDetector(const QString &mode, const QString &source)
 {
-    stopDetector();
+    if (m_detector && m_detector->state() != QProcess::NotRunning) {
+        m_pendingMode = mode;
+        m_pendingSource = source;
+        m_stopRequested = true;
+        m_detector->kill();
+        if (m_modeLabel) {
+            m_modeLabel->setText("正在切换");
+        }
+        appendLog("正在停止上一检测进程，随后切换模式。");
+        return;
+    }
+
     QDir().mkpath(runtimeDir());
 
     const QString script = detectorScriptPath();
@@ -1970,6 +1999,7 @@ void MainWindow::startDetector(const QString &mode, const QString &source)
     m_axisX->setRange(0, kChartWindow);
     m_lastMode = mode;
     m_lastSource = source;
+    m_stopRequested = false;
     setRunningUi(true);
     const QString startupModeText = mode == "simulation" ? "模拟模式" :
         mode == "camera" ? "摄像头模式" : "视频模式";
@@ -2014,6 +2044,13 @@ void MainWindow::readDetectorError()
 
 void MainWindow::handleDetectorFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    const bool requestedStop = m_stopRequested;
+    m_stopRequested = false;
+    const QString pendingMode = m_pendingMode;
+    const QString pendingSource = m_pendingSource;
+    m_pendingMode.clear();
+    m_pendingSource.clear();
+
     setRunningUi(false);
     if (m_modeLabel) {
         m_modeLabel->setText("已停止");
@@ -2021,7 +2058,7 @@ void MainWindow::handleDetectorFinished(int exitCode, QProcess::ExitStatus exitS
     appendLog(QString("检测进程退出：exitCode=%1, status=%2")
                   .arg(exitCode)
                   .arg(exitStatus == QProcess::NormalExit ? "NormalExit" : "CrashExit"));
-    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+    if (!requestedStop && (exitStatus != QProcess::NormalExit || exitCode != 0)) {
         const QString detail = m_lastDetectorError.trimmed().isEmpty()
             ? "没有捕获到 stderr。请检查 Python 依赖、脚本路径、视频文件或摄像头权限。"
             : m_lastDetectorError.trimmed();
@@ -2033,6 +2070,12 @@ void MainWindow::handleDetectorFinished(int exitCode, QProcess::ExitStatus exitS
                 .arg(exitCode)
                 .arg(exitStatus == QProcess::NormalExit ? "NormalExit" : "CrashExit")
                 .arg(detail.left(1800)));
+    }
+
+    if (!pendingMode.isEmpty()) {
+        QTimer::singleShot(0, this, [this, pendingMode, pendingSource]() {
+            startDetector(pendingMode, pendingSource);
+        });
     }
 }
 
@@ -2049,6 +2092,11 @@ void MainWindow::handleDetectorStarted()
 
 void MainWindow::handleDetectorError(QProcess::ProcessError error)
 {
+    if (m_stopRequested && error == QProcess::Crashed) {
+        appendLog("检测进程已按用户请求停止。");
+        return;
+    }
+
     setRunningUi(false);
     QString hint;
     switch (error) {
@@ -2295,8 +2343,15 @@ void MainWindow::updateVideoFrame(const QString &path)
         return;
     }
     m_currentFramePath = path;
+    QFile frameFile(path);
+    if (!frameFile.open(QIODevice::ReadOnly)) {
+        return;
+    }
+    const QByteArray frameData = frameFile.readAll();
+    frameFile.close();
+
     QPixmap latest;
-    if (latest.load(path)) {
+    if (latest.loadFromData(frameData, "JPG")) {
         m_currentPixmap = latest;
         refreshVideoPixmap();
     }
@@ -2391,10 +2446,10 @@ void MainWindow::updateHealthPanel(const FatigueSample &sample)
         return;
     }
 
-    const QString pythonPath = resolvePythonExecutable();
+    const QString pythonPath = m_pythonExecutable;
     m_healthProcessLabel->setText(QString("%1 | Python: %2")
         .arg(m_detector && m_detector->state() != QProcess::NotRunning ? "运行中" : "已停止",
-             pythonPath.isEmpty() ? "未找到" : pythonPath));
+             pythonPath.isEmpty() ? "待启动检测" : pythonPath));
     m_healthDbLabel->setText(m_db.isOpen()
         ? "已连接：" + QDir(runtimeDir()).filePath("driveguard.db")
         : "未连接");
@@ -2552,8 +2607,12 @@ QString MainWindow::detectorScriptPath() const
     return QDir(projectRoot()).filePath("scripts/detector.py");
 }
 
-QString MainWindow::resolvePythonExecutable() const
+QString MainWindow::resolvePythonExecutable()
 {
+    if (!m_pythonExecutable.isEmpty() && QFileInfo::exists(m_pythonExecutable)) {
+        return m_pythonExecutable;
+    }
+
     QStringList candidates;
     QStringList seen;
 
@@ -2617,7 +2676,8 @@ QString MainWindow::resolvePythonExecutable() const
     for (const QString &candidate : candidates) {
         QString detail;
         if (pythonCanRunDetector(candidate, &detail)) {
-            return QDir::toNativeSeparators(candidate);
+            m_pythonExecutable = QDir::toNativeSeparators(candidate);
+            return m_pythonExecutable;
         }
         if (firstError.isEmpty()) {
             firstError = QString("%1 -> %2").arg(candidate, detail);

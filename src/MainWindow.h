@@ -127,7 +127,7 @@ private:
     QString projectRoot() const;
     QString runtimeDir() const;
     QString detectorScriptPath() const;
-    QString resolvePythonExecutable() const;
+    QString resolvePythonExecutable();
 
     QTabWidget *m_tabs = nullptr;
     QLabel *m_videoLabel = nullptr;
@@ -197,6 +197,10 @@ private:
     QString m_lastDetectorError;
     QString m_lastVoiceKey;
     QString m_currentVoicePath;
+    QString m_pythonExecutable;
+    QString m_pendingMode;
+    QString m_pendingSource;
+    bool m_stopRequested = false;
     QElapsedTimer m_dbWriteClock;
     QElapsedTimer m_alarmClock;
     QElapsedTimer m_eventClock;

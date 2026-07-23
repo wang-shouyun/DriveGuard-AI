@@ -55,6 +55,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File verify_release.ps1 -Root dis
 
 结果：`Integrity: PASS (65 file(s) checked)`。
 
+## 2026-07-23 稳定性热修复回归
+
+- 连续生成 600 张实时 JPEG：进程退出码 0，无 `PermissionError`，滚动目录稳定保留 240 张。
+- 同一 runtime 并发启动两个检测器：第一个正常运行，第二个以退出码 4 和明确中文提示被拒绝，无共享文件竞争。
+- Qt/Python 联调：模拟模式持续出帧，主窗口保持响应；停止调用耗时 4 毫秒，检测进程归零。
+- 停止后异常弹窗回归：`检测进程错误=False`，`检测进程已退出=False`。
+- 继续按钮回归：停止后可重新启动上一模式，Python 检测进程恢复为 1 个。
+- 风险事件截图改为 `runtime/snapshots` 永久证据文件，实时帧清理不再破坏事件报告引用。
+
 ## 未在当前环境执行
 
 - 公开数据集离线准确率评估。

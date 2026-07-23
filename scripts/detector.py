@@ -12,6 +12,7 @@ without a camera.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -57,6 +58,8 @@ YAWN_CONFIRM_SECONDS = 1.0
 YAWN_HYSTERESIS = 0.08
 DEFAULT_FRAME_WIDTH = 800
 DEFAULT_FRAME_HEIGHT = 450
+RUNTIME_FRAME_KEEP_COUNT = 240
+RUNTIME_FRAME_CLEANUP_INTERVAL = 24
 
 LEVEL_TEXT = {
     "normal": "正常",
@@ -157,18 +160,126 @@ def solve_head_pose(landmarks, width: int, height: int) -> Tuple[float, float, f
     )
 
 
-def write_jpeg_atomic(path: Path, frame: np.ndarray, quality: int = 86) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.stem}.{os.getpid()}.tmp{path.suffix}")
-    ok = cv2.imwrite(str(tmp_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
-    if not ok:
+_runtime_frame_sequence = 0
+
+
+def cleanup_runtime_frames(frame_dir: Path, keep: int = RUNTIME_FRAME_KEEP_COUNT) -> None:
+    try:
+        frames = sorted(
+            (path for path in frame_dir.glob("frame_*.jpg") if path.is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        return
+
+    for old_frame in frames[max(1, keep):]:
         try:
-            tmp_path.unlink(missing_ok=True)
+            old_frame.unlink()
         except OSError:
+            # A UI preview, antivirus scanner or report export may still be reading it.
             pass
-        return False
-    os.replace(str(tmp_path), str(path))
-    return True
+
+
+def write_runtime_frame(runtime: Path, frame: np.ndarray, quality: int = 86) -> str:
+    """Publish a completed frame through a unique immutable path.
+
+    The GUI only sees the path after cv2.imwrite() returns. This avoids replacing
+    a shared frame_latest.jpg while Windows or Qt still has that file open.
+    """
+
+    global _runtime_frame_sequence
+    frame_dir = runtime / "frames"
+    try:
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        _runtime_frame_sequence += 1
+        frame_path = frame_dir / (
+            f"frame_{os.getpid()}_{time.time_ns()}_{_runtime_frame_sequence:08d}.jpg"
+        )
+        ok = cv2.imwrite(
+            str(frame_path),
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)],
+        )
+    except (OSError, cv2.error) as exc:
+        print(f"实时帧写入失败：{exc}", file=sys.stderr, flush=True)
+        return ""
+
+    if not ok:
+        print(f"实时帧编码失败：{frame_path}", file=sys.stderr, flush=True)
+        return ""
+
+    if _runtime_frame_sequence % RUNTIME_FRAME_CLEANUP_INTERVAL == 0:
+        cleanup_runtime_frames(frame_dir)
+    return str(frame_path)
+
+
+class DetectorAlreadyRunningError(RuntimeError):
+    pass
+
+
+class RuntimeProcessLock:
+    """One detector process per runtime directory.
+
+    Windows named mutexes are released by the OS even when QProcess terminates
+    Python forcefully, so a crash cannot leave a stale lock behind.
+    """
+
+    def __init__(self, runtime: Path) -> None:
+        runtime_key = str(runtime.resolve()).casefold().encode("utf-8", errors="surrogatepass")
+        digest = hashlib.sha256(runtime_key).hexdigest()[:24]
+        self.name = f"Local\\DriveGuardAI.Detector.{digest}"
+        self.runtime = runtime
+        self._handle = None
+        self._file = None
+
+    def acquire(self) -> None:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+            kernel32.CreateMutexW.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            ctypes.set_last_error(0)
+            handle = kernel32.CreateMutexW(None, False, self.name)
+            error = ctypes.get_last_error()
+            if not handle:
+                raise OSError(error, "无法创建检测进程互斥锁")
+            if error == 183:  # ERROR_ALREADY_EXISTS
+                kernel32.CloseHandle(handle)
+                raise DetectorAlreadyRunningError(
+                    "同一运行目录已有检测进程，请关闭重复的软件窗口后重试。"
+                )
+            self._handle = (kernel32, handle)
+            return
+
+        import fcntl
+
+        lock_path = self.runtime / "detector.lock"
+        self._file = lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self._file.close()
+            self._file = None
+            raise DetectorAlreadyRunningError(
+                "同一运行目录已有检测进程，请关闭重复的软件窗口后重试。"
+            ) from exc
+
+    def release(self) -> None:
+        if self._handle is not None:
+            kernel32, handle = self._handle
+            kernel32.CloseHandle(handle)
+            self._handle = None
+        if self._file is not None:
+            try:
+                self._file.close()
+            finally:
+                self._file = None
 
 
 def camera_frame_health(frame: Optional[np.ndarray]) -> Tuple[bool, float, float, str]:
@@ -584,8 +695,7 @@ class SimulationEngine:
                 pitch,
                 yaw,
             )
-            frame_path = str(runtime / "frame_latest.jpg")
-            write_jpeg_atomic(Path(frame_path), frame)
+            frame_path = write_runtime_frame(runtime, frame)
 
         return build_sample(
             mode="simulation",
@@ -839,18 +949,28 @@ class DetectorRunner:
         self.performance = PerformanceMeter()
         self.simulation = SimulationEngine(args.simulation_cycle, args.seed)
         self.haar_rng = random.Random(args.seed + 17)
-        self.last_camera_frame_path = str(self.runtime / "frame_latest.jpg")
+        self.runtime_lock = RuntimeProcessLock(self.runtime)
+        self.last_camera_frame_path = ""
 
     def emit(self, sample: Dict[str, object]) -> None:
         print(json.dumps(sample, ensure_ascii=False, separators=(",", ":")), flush=True)
 
     def run(self) -> int:
-        if self.args.mode == "simulation":
-            return self.run_simulation()
-        if self.args.mode in ("camera", "video"):
-            return self.run_capture(self.args.mode)
-        print(f"unknown mode: {self.args.mode}", file=sys.stderr)
-        return 2
+        try:
+            self.runtime_lock.acquire()
+        except DetectorAlreadyRunningError as exc:
+            print(str(exc), file=sys.stderr, flush=True)
+            return 4
+
+        try:
+            if self.args.mode == "simulation":
+                return self.run_simulation()
+            if self.args.mode in ("camera", "video"):
+                return self.run_capture(self.args.mode)
+            print(f"unknown mode: {self.args.mode}", file=sys.stderr)
+            return 2
+        finally:
+            self.runtime_lock.release()
 
     def run_simulation(self) -> int:
         sample_count = 0
@@ -1037,11 +1157,11 @@ class DetectorRunner:
 
     def _write_frame(self, frame: np.ndarray, level: str, score: int, backend: str) -> str:
         draw_branding(frame, level, int(score), backend)
-        frame_path = self.runtime / "frame_latest.jpg"
         if not self.args.no_frame_output:
-            write_jpeg_atomic(frame_path, frame)
-            self.last_camera_frame_path = str(frame_path)
-        return str(frame_path)
+            frame_path = write_runtime_frame(self.runtime, frame)
+            if frame_path:
+                self.last_camera_frame_path = frame_path
+        return self.last_camera_frame_path
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

@@ -3,6 +3,7 @@
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,39 @@ def main() -> int:
         if not (0.0 <= float(sample["perclos"]) <= 1.0):
             return fail("PERCLOS out of bounds")
         json.dumps(sample, ensure_ascii=False)
+
+    with tempfile.TemporaryDirectory(prefix="driveguard_smoke_") as temp_dir:
+        runtime = Path(temp_dir)
+        frame = detector.np.zeros((90, 160, 3), dtype=detector.np.uint8)
+        paths = [detector.write_runtime_frame(runtime, frame) for _ in range(8)]
+        if any(not path or not Path(path).is_file() for path in paths):
+            return fail("runtime frame write failed")
+        if len(set(paths)) != len(paths):
+            return fail("runtime frames did not use unique paths")
+        if any(detector.cv2.imread(path) is None for path in paths):
+            return fail("runtime frame could not be decoded")
+
+        detector.cleanup_runtime_frames(runtime / "frames", keep=3)
+        if len(list((runtime / "frames").glob("frame_*.jpg"))) > 3:
+            return fail("runtime frame retention cleanup failed")
+
+        first_lock = detector.RuntimeProcessLock(runtime)
+        second_lock = detector.RuntimeProcessLock(runtime)
+        first_lock.acquire()
+        try:
+            try:
+                second_lock.acquire()
+            except detector.DetectorAlreadyRunningError:
+                pass
+            else:
+                second_lock.release()
+                return fail("duplicate detector runtime lock was not rejected")
+        finally:
+            first_lock.release()
+
+        second_lock.acquire()
+        second_lock.release()
+
     print("PASS: detector simulation smoke test")
     return 0
 
