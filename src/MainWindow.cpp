@@ -29,6 +29,7 @@
 #include <QPlainTextEdit>
 #include <QProcessEnvironment>
 #include <QProgressBar>
+#include <QRegularExpression>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -175,6 +176,47 @@ bool pythonCanRunDetector(const QString &python, QString *detail = nullptr)
         return false;
     }
     return true;
+}
+
+QString cleanExecutablePath(QString path)
+{
+    path = path.trimmed();
+    if (path.size() >= 2 && path.startsWith('"') && path.endsWith('"')) {
+        path = path.mid(1, path.size() - 2);
+    }
+    return QDir::cleanPath(path);
+}
+
+QStringList pythonLauncherInstalledPythons(const QString &launcher)
+{
+    QStringList candidates;
+    if (launcher.isEmpty()) {
+        return candidates;
+    }
+
+    QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(launcher, {"-0p"});
+    if (!process.waitForStarted(2000)) {
+        return candidates;
+    }
+    if (!process.waitForFinished(4000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        return candidates;
+    }
+
+    const QString output = QString::fromUtf8(process.readAll());
+    const QRegularExpression exePattern(
+        R"(([A-Za-z]:[^\r\n]*?python(?:3)?\.exe))",
+        QRegularExpression::CaseInsensitiveOption
+    );
+    const auto matches = exePattern.globalMatch(output);
+    auto it = matches;
+    while (it.hasNext()) {
+        candidates << cleanExecutablePath(it.next().captured(1));
+    }
+    return candidates;
 }
 
 QLabel *makeTitle(const QString &text)
@@ -2512,27 +2554,73 @@ QString MainWindow::detectorScriptPath() const
 
 QString MainWindow::resolvePythonExecutable() const
 {
+    QStringList candidates;
+    QStringList seen;
+
+    auto appendCandidate = [&](QString candidate) {
+        candidate = cleanExecutablePath(candidate);
+        if (candidate.isEmpty()) {
+            return;
+        }
+
+        QFileInfo info(candidate);
+        if (info.isDir()) {
+            info = QFileInfo(QDir(candidate).filePath("python.exe"));
+        }
+        if (!info.exists() || !info.isFile()) {
+            return;
+        }
+
+        const QString canonical = info.canonicalFilePath();
+        const QString key = (canonical.isEmpty() ? info.absoluteFilePath() : canonical).toCaseFolded();
+        if (seen.contains(key)) {
+            return;
+        }
+        seen << key;
+        candidates << QDir::toNativeSeparators(info.absoluteFilePath());
+    };
+
     const QString envPython = qEnvironmentVariable("DRIVEGUARD_PYTHON");
-    if (!envPython.isEmpty() && QFileInfo::exists(envPython) && pythonCanRunDetector(envPython)) {
-        return QDir::toNativeSeparators(envPython);
+    appendCandidate(envPython);
+
+    const QProcessEnvironment systemEnv = QProcessEnvironment::systemEnvironment();
+    const QString envPath = systemEnv.value("PATH", systemEnv.value("Path"));
+    const QStringList pathDirs = envPath.split(QDir::listSeparator(), Qt::SkipEmptyParts);
+    for (const QString &dir : pathDirs) {
+        appendCandidate(QDir(dir).filePath("python.exe"));
+        appendCandidate(QDir(dir).filePath("python3.exe"));
     }
 
     const QDir root(projectRoot());
     const QStringList localCandidates = {
         root.filePath(".venv/Scripts/python.exe"),
-        root.filePath("python/python.exe")
+        root.filePath("python/python.exe"),
+        root.filePath("../.venv/Scripts/python.exe")
     };
     for (const QString &candidate : localCandidates) {
-        if (QFileInfo::exists(candidate) && pythonCanRunDetector(candidate)) {
-            return QDir::toNativeSeparators(candidate);
-        }
+        appendCandidate(candidate);
     }
 
     const QStringList names = {"python.exe", "python", "py.exe", "py"};
     for (const QString &name : names) {
         const QString found = QStandardPaths::findExecutable(name);
-        if (!found.isEmpty() && pythonCanRunDetector(found)) {
-            return QDir::toNativeSeparators(found);
+        appendCandidate(found);
+        if (QFileInfo(found).fileName().compare("py.exe", Qt::CaseInsensitive) == 0
+            || QFileInfo(found).fileName().compare("py", Qt::CaseInsensitive) == 0) {
+            for (const QString &candidate : pythonLauncherInstalledPythons(found)) {
+                appendCandidate(candidate);
+            }
+        }
+    }
+
+    QString firstError;
+    for (const QString &candidate : candidates) {
+        QString detail;
+        if (pythonCanRunDetector(candidate, &detail)) {
+            return QDir::toNativeSeparators(candidate);
+        }
+        if (firstError.isEmpty()) {
+            firstError = QString("%1 -> %2").arg(candidate, detail);
         }
     }
     return {};
