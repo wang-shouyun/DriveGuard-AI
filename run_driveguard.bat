@@ -8,6 +8,10 @@ if exist "%~dp0.venv\Scripts\python.exe" (
     set "DRIVEGUARD_PYTHON=%~dp0.venv\Scripts\python.exe"
 )
 
+if not defined DRIVEGUARD_PYTHON if exist "%~dp0python\python.exe" (
+    set "DRIVEGUARD_PYTHON=%~dp0python\python.exe"
+)
+
 if exist "%~dp0bin\DriveGuardAI.exe" (
     start "" "%~dp0bin\DriveGuardAI.exe"
     exit /b 0
