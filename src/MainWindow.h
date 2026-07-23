@@ -194,6 +194,7 @@ private:
     QString m_lastMode;
     QString m_lastSource;
     QString m_lastEventType;
+    QString m_lastDetectorError;
     QString m_lastVoiceKey;
     QString m_currentVoicePath;
     QElapsedTimer m_dbWriteClock;

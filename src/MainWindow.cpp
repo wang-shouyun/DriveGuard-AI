@@ -124,6 +124,59 @@ QString brandSignature()
         .arg(authorName(), productIdentity(), shortAuthorshipHash());
 }
 
+bool isPythonLauncher(const QString &python)
+{
+    const QString name = QFileInfo(python).fileName();
+    return name.compare("py.exe", Qt::CaseInsensitive) == 0
+        || name.compare("py", Qt::CaseInsensitive) == 0;
+}
+
+QStringList pythonRuntimeProbeArgs(const QString &python)
+{
+    QStringList args;
+    if (isPythonLauncher(python)) {
+        args << "-3";
+    }
+    args << "-c" << "import cv2, numpy; print('driveguard-python-ok')";
+    return args;
+}
+
+bool pythonCanRunDetector(const QString &python, QString *detail = nullptr)
+{
+    if (python.isEmpty()) {
+        if (detail) {
+            *detail = "Python path is empty";
+        }
+        return false;
+    }
+
+    QProcess probe;
+    probe.setProcessChannelMode(QProcess::MergedChannels);
+    probe.start(python, pythonRuntimeProbeArgs(python));
+    if (!probe.waitForStarted(2500)) {
+        if (detail) {
+            *detail = probe.errorString();
+        }
+        return false;
+    }
+    if (!probe.waitForFinished(7000)) {
+        probe.kill();
+        probe.waitForFinished(1000);
+        if (detail) {
+            *detail = "Python dependency probe timed out";
+        }
+        return false;
+    }
+    const QString output = QString::fromUtf8(probe.readAll()).trimmed();
+    if (probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
+        if (detail) {
+            *detail = output.isEmpty() ? probe.errorString() : output;
+        }
+        return false;
+    }
+    return true;
+}
+
 QLabel *makeTitle(const QString &text)
 {
     auto *label = new QLabel(text);
@@ -1838,15 +1891,16 @@ void MainWindow::startDetector(const QString &mode, const QString &source)
     const QString python = resolvePythonExecutable();
     if (python.isEmpty()) {
         QMessageBox::critical(this, "缺少 Python",
-            "未找到可用 Python。请安装 Python 3.9，或设置 DRIVEGUARD_PYTHON 指向 python.exe。");
-        appendLog("Python 解释器未找到。可设置 DRIVEGUARD_PYTHON 或在项目根目录创建 .venv。");
+            "未找到可运行检测脚本的 Python 环境。\n\n"
+            "需要 Python 能够导入 cv2 和 numpy。请运行 scripts\\setup_windows.ps1，"
+            "或设置 DRIVEGUARD_PYTHON 指向已安装依赖的 python.exe。");
+        appendLog("Python 环境不可用：需要 cv2/numpy。可运行 scripts\\setup_windows.ps1 或设置 DRIVEGUARD_PYTHON。");
         setRunningUi(false);
         return;
     }
 
     QStringList args;
-    if (QFileInfo(python).fileName().compare("py.exe", Qt::CaseInsensitive) == 0
-        || QFileInfo(python).fileName().compare("py", Qt::CaseInsensitive) == 0) {
+    if (isPythonLauncher(python)) {
         args << "-3";
     }
     args << script
@@ -1860,9 +1914,13 @@ void MainWindow::startDetector(const QString &mode, const QString &source)
 
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert("PYTHONUNBUFFERED", "1");
+    env.insert("DRIVEGUARD_PYTHON", python);
+    env.insert("DRIVEGUARD_ROOT", projectRoot());
+    env.insert("DRIVEGUARD_RUNTIME_DIR", runtimeDir());
     m_detector->setProcessEnvironment(env);
     m_detector->setWorkingDirectory(projectRoot());
     m_stdoutBuffer.clear();
+    m_lastDetectorError.clear();
 
     m_scoreSeries->clear();
     m_perclosSeries->clear();
@@ -1903,6 +1961,10 @@ void MainWindow::readDetectorError()
                 || line.contains("inference_feedback_manager.cc")) {
                 continue;
             }
+            m_lastDetectorError += line + "\n";
+            if (m_lastDetectorError.size() > 4000) {
+                m_lastDetectorError = m_lastDetectorError.right(4000);
+            }
             appendLog("[detector] " + line);
         }
     }
@@ -1917,6 +1979,19 @@ void MainWindow::handleDetectorFinished(int exitCode, QProcess::ExitStatus exitS
     appendLog(QString("检测进程退出：exitCode=%1, status=%2")
                   .arg(exitCode)
                   .arg(exitStatus == QProcess::NormalExit ? "NormalExit" : "CrashExit"));
+    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+        const QString detail = m_lastDetectorError.trimmed().isEmpty()
+            ? "没有捕获到 stderr。请检查 Python 依赖、脚本路径、视频文件或摄像头权限。"
+            : m_lastDetectorError.trimmed();
+        if (m_reasonLabel) {
+            m_reasonLabel->setText("检测进程异常退出：" + detail.left(240));
+        }
+        QMessageBox::warning(this, "检测进程已退出",
+            QString("Python 检测进程异常退出。\n\nexitCode=%1\nstatus=%2\n\n%3")
+                .arg(exitCode)
+                .arg(exitStatus == QProcess::NormalExit ? "NormalExit" : "CrashExit")
+                .arg(detail.left(1800)));
+    }
 }
 
 void MainWindow::handleDetectorStarted()
@@ -2438,7 +2513,7 @@ QString MainWindow::detectorScriptPath() const
 QString MainWindow::resolvePythonExecutable() const
 {
     const QString envPython = qEnvironmentVariable("DRIVEGUARD_PYTHON");
-    if (!envPython.isEmpty() && QFileInfo::exists(envPython)) {
+    if (!envPython.isEmpty() && QFileInfo::exists(envPython) && pythonCanRunDetector(envPython)) {
         return QDir::toNativeSeparators(envPython);
     }
 
@@ -2448,7 +2523,7 @@ QString MainWindow::resolvePythonExecutable() const
         root.filePath("python/python.exe")
     };
     for (const QString &candidate : localCandidates) {
-        if (QFileInfo::exists(candidate)) {
+        if (QFileInfo::exists(candidate) && pythonCanRunDetector(candidate)) {
             return QDir::toNativeSeparators(candidate);
         }
     }
@@ -2456,7 +2531,7 @@ QString MainWindow::resolvePythonExecutable() const
     const QStringList names = {"python.exe", "python", "py.exe", "py"};
     for (const QString &name : names) {
         const QString found = QStandardPaths::findExecutable(name);
-        if (!found.isEmpty()) {
+        if (!found.isEmpty() && pythonCanRunDetector(found)) {
             return QDir::toNativeSeparators(found);
         }
     }
