@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: "DriveGuard-AI fatigue driving intelligent warning virtual simulation system"
+message: "If you use this course project or prototype in teaching or demonstration, please cite it as below."
+type: software
+authors:
+  - family-names: "Rao"
+    given-names: "Jing"
+version: "1.0.0"
+date-released: "2026-07-23"
+license: "GPL-3.0-only"
+abstract: "A CPU-oriented Qt/OpenCV/MediaPipe course design prototype for virtual simulation, camera/video fatigue cues, local event records, and report export."

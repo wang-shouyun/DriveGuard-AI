@@ -1,0 +1,30 @@
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @DRIVEGUARD_VERSION_COMMA@
+ PRODUCTVERSION @DRIVEGUARD_VERSION_COMMA@
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "Rao Jing"
+            VALUE "FileDescription", "DriveGuard-AI fatigue driving warning prototype"
+            VALUE "FileVersion", "@DRIVEGUARD_VERSION_TEXT@"
+            VALUE "InternalName", "DriveGuardAI"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Rao Jing. Licensed under the GNU General Public License v3.0 only."
+            VALUE "OriginalFilename", "DriveGuardAI.exe"
+            VALUE "ProductName", "DriveGuard-AI"
+            VALUE "ProductVersion", "@DRIVEGUARD_VERSION_TEXT@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

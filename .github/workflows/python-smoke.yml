@@ -1,0 +1,30 @@
+name: Python smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+          cache: "pip"
+          cache-dependency-path: "scripts/requirements.txt"
+      - name: Install dependencies
+        run: python -m pip install -r scripts\requirements.txt
+      - name: Compile Python
+        run: |
+          python -m py_compile scripts\detector.py
+          python -m py_compile scripts\smoke_test.py
+          python -m py_compile scripts\repo_check.py
+          python -m py_compile tests\test_detector_logic.py
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Smoke test
+        run: python scripts\smoke_test.py
+      - name: Repository check
+        run: python scripts\repo_check.py

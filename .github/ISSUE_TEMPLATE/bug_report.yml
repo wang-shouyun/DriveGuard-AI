@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem in DriveGuard-AI.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not upload real face images, runtime databases, or private file paths."
+  - type: input
+    id: system
+    attributes:
+      label: Windows version
+    validations:
+      required: true
+  - type: input
+    id: qt
+    attributes:
+      label: Qt version
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Input mode
+      options:
+        - simulation
+        - camera
+        - video
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs without sensitive data
+  - type: checkboxes
+    id: reproducible
+    attributes:
+      label: Checks
+      options:
+        - label: The issue reproduces in simulation mode.
+        - label: I am not uploading real face images or runtime databases.

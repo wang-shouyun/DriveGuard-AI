@@ -1,0 +1,36 @@
+# Build
+build/
+dist/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.user
+*.pro.user
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime and user data
+runtime/
+reports/
+snapshots/
+*.db
+*.sqlite
+*.sqlite3
+frame_latest.jpg
+*.tmp.jpg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Release
+SHA256SUMS.txt

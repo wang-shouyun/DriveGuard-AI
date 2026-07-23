@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/meta">
+        <file alias="authorship.json">assets/authorship.json</file>
+    </qresource>
+</RCC>

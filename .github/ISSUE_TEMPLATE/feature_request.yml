@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest a scoped improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Use case
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+  - type: textarea
+    id: value
+    attributes:
+      label: Expected value
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Project boundary
+      options:
+        - label: This request fits a local Qt/OpenCV/MediaPipe course prototype.
+        - label: This request does not require cloud upload or paid services.

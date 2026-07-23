@@ -1,0 +1,12 @@
+{
+  "product": "DriveGuard-AI",
+  "version": "1.0.0",
+  "author": "Rao Jing",
+  "author_cn": "饶晶",
+  "identity": "DGAI-RJ-2026",
+  "authorship_notice_cn": "由饶晶制作。",
+  "copyright": "Copyright (C) 2026 Rao Jing.",
+  "license": "GPL-3.0-only",
+  "license_notice": "Licensed under the GNU General Public License v3.0 only.",
+  "project_type": "Qt/OpenCV/MediaPipe course design and software engineering prototype"
+}
