@@ -31,6 +31,13 @@ import cv2
 import numpy as np
 
 try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+try:
     import mediapipe as mp
 except Exception:
     mp = None
@@ -57,6 +64,14 @@ LEVEL_TEXT = {
     "moderate": "中度疲劳",
     "severe": "重度疲劳",
     "invalid": "无有效画面",
+}
+
+LEVEL_TEXT_ASCII = {
+    "normal": "NORMAL",
+    "light": "LIGHT",
+    "moderate": "MODERATE",
+    "severe": "SEVERE",
+    "invalid": "INVALID",
 }
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
@@ -608,7 +623,95 @@ def generate_simulation_sample(
     return engine.sample(elapsed, runtime, no_frame_output=no_frame_output)
 
 
+_FONT_CACHE: Dict[Tuple[int, bool], object] = {}
+
+
+def load_cjk_font(size: int, bold: bool = False):
+    if ImageFont is None:
+        return None
+    key = (size, bold)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+
+    font_names = [
+        "msyhbd.ttc" if bold else "msyh.ttc",
+        "simhei.ttf",
+        "simsun.ttc",
+    ]
+    font_dirs = [
+        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts",
+        Path("/System/Library/Fonts"),
+        Path("/usr/share/fonts"),
+    ]
+
+    for font_dir in font_dirs:
+        for name in font_names:
+            path = font_dir / name
+            if path.exists():
+                try:
+                    font = ImageFont.truetype(str(path), size)
+                    _FONT_CACHE[key] = font
+                    return font
+                except Exception:
+                    continue
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    _FONT_CACHE[key] = font
+    return font
+
+
+def draw_chinese_branding(frame: np.ndarray, level: str, score: int, backend: str) -> bool:
+    if Image is None or ImageDraw is None:
+        return False
+
+    h, w = frame.shape[:2]
+    header_h = max(56, h // 8)
+    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image)
+
+    title_font = load_cjk_font(max(24, h // 16), bold=True)
+    badge_font = load_cjk_font(max(19, h // 20), bold=True)
+    small_font = load_cjk_font(max(13, h // 34), bold=False)
+    if not title_font or not badge_font or not small_font:
+        return False
+
+    badge_rgb = {
+        "normal": (82, 175, 92),
+        "light": (241, 161, 37),
+        "moderate": (224, 106, 39),
+        "severe": (216, 36, 60),
+        "invalid": (140, 129, 118),
+    }.get(level, (140, 129, 118))
+    badge_w = max(170, w // 5)
+    badge_box = (w - badge_w - 28, 16, w - 28, header_h - 14)
+
+    draw.rectangle((0, 0, w, header_h), fill=(21, 27, 35))
+    draw.text((28, 16), "DriveGuard-AI", font=title_font, fill=(242, 247, 251))
+    draw.rectangle(badge_box, fill=badge_rgb)
+
+    badge_text = LEVEL_TEXT.get(level, level)
+    bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    badge_x = badge_box[0] + max(8, (badge_w - text_w) // 2)
+    badge_y = badge_box[1] + max(2, (badge_box[3] - badge_box[1] - text_h) // 2) - 2
+    draw.text((badge_x, badge_y), badge_text, font=badge_font, fill=(255, 255, 255))
+
+    draw.text((24, h - 27), f"评分 {score:03d} | {backend}", font=small_font, fill=(245, 248, 252))
+    author_text = "制作：饶晶 / 2026"
+    author_bbox = draw.textbbox((0, 0), author_text, font=small_font)
+    draw.text((w - (author_bbox[2] - author_bbox[0]) - 24, h - 27), author_text, font=small_font, fill=(220, 232, 242))
+
+    frame[:] = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    return True
+
+
 def draw_branding(frame: np.ndarray, level: str, score: int, backend: str) -> np.ndarray:
+    if draw_chinese_branding(frame, level, score, backend):
+        return frame
+
     h, w = frame.shape[:2]
     header_h = max(56, h // 8)
     cv2.rectangle(frame, (0, 0), (w, header_h), (21, 27, 35), -1)
@@ -622,7 +725,7 @@ def draw_branding(frame: np.ndarray, level: str, score: int, backend: str) -> np
     }.get(level, (118, 129, 140))
     badge_w = max(170, w // 5)
     cv2.rectangle(frame, (w - badge_w - 28, 16), (w - 28, header_h - 14), badge_color, -1)
-    cv2.putText(frame, LEVEL_TEXT.get(level, level).upper(), (w - badge_w - 6, header_h - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.66, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, LEVEL_TEXT_ASCII.get(level, level.upper()), (w - badge_w - 6, header_h - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.66, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(frame, f"Score {score:03d} | {backend}", (24, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (245, 248, 252), 1, cv2.LINE_AA)
     cv2.putText(frame, "Rao Jing / 2026", (w - 168, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 232, 242), 1, cv2.LINE_AA)
     return frame
